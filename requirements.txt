@@ -4,3 +4,5 @@ python-multipart
 PyMuPDF
 Pillow
 openai
+email
+eml-extractor

@@ -6,15 +6,7 @@ import io
 import base64
 from openai import AzureOpenAI
 import uvicorn
-from email import policy
-from email.parser import BytesParser
-import os
 
-# Path to the .eml file
-eml_file_path = "Invoice.eml"
-
-# Output directory for extracted PDFs
-output_dir = "extracted_pdfs"
 
 app = FastAPI()
 
@@ -70,18 +62,15 @@ def call_gpt4o_with_image(image_bytes):
                         {
                             "type": "text",
                             "text": (
-                                "I have uploaded a image file that may contain multiple invoices."
-                                "Please analyze the entire document and extract the following key fields for each invoice found:"
-
-                                "Invoice Number"
-                                "Invoice Date"
-                                "Vendor Name (sometimes it is the name of the vendor available as logo)"
-                                "Total Amount"
-                                "Purchase Order"
-
-                                "Return the results as a JSON array, where each object represents one invoice."
-                                "Make sure the structure is consistent and clearly grouped by invoice."
-                                "If any field is missing or unclear, leave its value as null."
+                                "Extract the following fields from the invoice image and provide ONLY a JSON object in this exact format:\n"
+                                "{\n"
+                                "  \"title\": string or null (sometimes it is the name of the vendor avialble as logo),\n"
+                                "  \"invoice_id\": string or null (sometimes it is available as 'INVOICE #' or 'Invoice Number'),\n"
+                                "  \"purchase_order\": string or null,\n"
+                                "  \"amount\": string or null (sometimes available as 'Invoice Total' or 'Amount Due'),\n"
+                                "  \"invoice_date\": string or null (it is available as 'Invoice Date')\n"
+                                "}\n\n"
+                                "If the invoice image contains information from several invoices,read each page carefully and create an array of the above JSON objects for each invoice."
                                 "Return ONLY the JSON with no markdown formatting, explanations, or additional text."
                             ),
                         },
@@ -103,7 +92,7 @@ def call_gpt4o_with_image(image_bytes):
 
 @app.post("/process-pdf")
 async def process_pdf(file: UploadFile = File(...)):
-    print("inside function psot")
+    print("inside function")
     if not file.filename.endswith(".pdf"):
        raise HTTPException(status_code=400, detail="File must be a PDF.")
     
@@ -112,49 +101,19 @@ async def process_pdf(file: UploadFile = File(...)):
         images = pdf_to_images(pdf_bytes)
         results = []
         
-        new_img = join_images_from_bytes(images)
-        response = call_gpt4o_with_image(new_img)
-        results.append(response)
+        #new_img = join_images_from_bytes(images)
+        #response = call_gpt4o_with_image(new_img)
+        #results.append(response)
      
-        #for img in images:
-        #    response = call_gpt4o_with_image(img)
-        #    results.append(response)
-        #results = [call_gpt4o_with_image(img) for img in images]
+        for img in images:
+            response = call_gpt4o_with_image(img)
+            results.append(response)
+        results = [call_gpt4o_with_image(img) for img in images]
         #return JSONResponse(content={"results": results})
         return  results 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-@app.post("/extract-attachments")
-async def extract_attachments(eml_file: UploadFile = File(...)):
-
-    print("Inside extract-attachments")
-    content = await eml_file.read()
-    msg = BytesParser(policy=policy.default).parsebytes(content)
-    pdf_files = []
-    print(msg)
-    # Go through each part of the email
-    for part in msg.iter_attachments():
-        content_type = part.get_content_type()
-        filename = part.get_filename()
-
-        if filename and filename.lower().endswith(".pdf"):
-            pdf_bytes = part.get_payload(decode=True)
-            encoded_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            pdf_files.append({
-                "filename": filename,
-                "content_base64": encoded_pdf
-            })
-            #filepath = os.path.join(filename)
-            #with open(filepath, 'wb') as pdf_file:
-            #    pdf_file.write(part.get_payload(decode=True))
-            #print(f"✅ Extracted PDF: {filepath}")
-            return JSONResponse(content={"pdf_files": pdf_files})
-
-    print("❌ No PDF attachment found in the .eml file.")
-    return None
 
 if __name__ == '__main__':
     uvicorn.run('main:app', host='0.0.0.0', port=8000)
 #https://chatgpt.com/c/681a1eee-5c24-800e-bb11-ddfeeb6f79d8
-#https://chatgpt.com/c/6846eba1-6688-800e-a3ed-6eaaa138a52d
