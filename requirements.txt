@@ -4,4 +4,3 @@ python-multipart
 PyMuPDF
 Pillow
 openai
-email
