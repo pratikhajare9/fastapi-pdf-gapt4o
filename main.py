@@ -8,6 +8,7 @@ from openai import AzureOpenAI
 import uvicorn
 from email import policy
 from email.parser import BytesParser
+from pdf2image import convert_from_path,convert_from_bytes
 import os
 
 # Path to the .eml file
@@ -24,6 +25,42 @@ client = AzureOpenAI(
     api_version="2025-01-01-preview", # Replace with your actual API version
     azure_endpoint="https://at-aiagent-ai-studio-wu.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview", # Replace with your actual Azure endpoint
 )
+# === Read PDF Text ===
+def extract_text_from_pdf(pdf_path):
+    doc = fitz.open(pdf_path)
+    full_text = ""
+    for page in doc:
+        full_text += page.get_text()
+    return full_text
+
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
+    # Open PDF from bytes
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    full_text = ""
+
+    for page in doc:
+        full_text += page.get_text()
+
+    return full_text
+
+# === Your Prompt ===
+INVOICE_EXTRACTION_PROMPT = """
+            You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents. The document may contain one or multiple invoices, often across several pages.
+
+            From each invoice, identify and extract the following fields in a consistent JSON array format. Maintain the order of invoices as found in the document.
+            Extract and return data in this exact JSON structure:
+
+            [{Invoice Number: <Invoice number string>,Invoice Date: <Date in MM-DD-YYYY format>,Vendor Name: <Vendor or company name (from header or logo)>,Purchase Order: <Purchase order number or code>,Total Amount: <Total invoice amount as number, no currency symbol>,}]
+
+            ### Guidelines:
+            - Always return an array of invoice objects, even if only one invoice is found.
+            - Vendor Name may be found in headers, footers, or logos (e.g., 'Ingram Micro Inc.', 'Park Place Technologies LLC').
+            - Purchase Order may appear as PO, Customer PO, or embedded in descriptions—extract the most relevant code associated with order tracking.
+            - Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available.
+            - Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections.
+
+            Return only the JSON. Do not include explanations, notes, or any other commentary.
+            """
 
 def join_images_from_bytes(image_bytes_list):
     # Load images from bytes
@@ -40,6 +77,7 @@ def join_images_from_bytes(image_bytes_list):
         y_offset += img.height
     buffered = io.BytesIO()
     new_img.save(buffered, format="PNG")
+    new_img.save("combined_pages.png", "PNG")
     return buffered.getvalue()
 
 def pdf_to_images(pdf_bytes):
@@ -47,7 +85,7 @@ def pdf_to_images(pdf_bytes):
     pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
     for page_index in range(len(pdf)):
         page = pdf[page_index]
-        pix = page.get_pixmap(dpi=200)
+        pix = page.get_pixmap(dpi=400)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
@@ -70,19 +108,21 @@ def call_gpt4o_with_image(image_bytes):
                         {
                             "type": "text",
                             "text": (
-                                "I have uploaded a image file that may contain multiple invoices."
-                                "Please analyze the entire document and extract the following key fields for each invoice found:"
+                                "You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents. The document may contain one or multiple invoices, often across several pages."
 
-                                "Invoice Number"
-                                "Invoice Date"
-                                "Vendor Name (sometimes it is the name of the vendor available as logo)"
-                                "Total Amount"
-                                "Purchase Order"
+                                "From each invoice, identify and extract the following fields in a consistent JSON array format. Maintain the order of invoices as found in the document."
+                                "Extract and return data in this exact JSON structure:"
 
-                                "Return the results as a JSON array, where each object represents one invoice."
-                                "Make sure the structure is consistent and clearly grouped by invoice."
-                                "If any field is missing or unclear, leave its value as null."
-                                "Return ONLY the JSON with no markdown formatting, explanations, or additional text."
+                                "[{Invoice Number: <Invoice number string>,Invoice Date: <Date in YYYY-MM-DD format>,Vendor Name: <Vendor or company name (from header or logo)>,Purchase Order: <Purchase order number or code>,Total Amount: <Total invoice amount as number, no currency symbol>,}]"
+
+                                "### Guidelines:"
+                                "- Always return an array of invoice objects, even if only one invoice is found."
+                                "- Vendor Name may be found in headers, footers, or logos (e.g., 'Ingram Micro Inc.', 'Park Place Technologies LLC')."
+                                "- Purchase Order may appear as PO, Customer PO, or embedded in descriptions—extract the most relevant code associated with order tracking."
+                                "- Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available."
+                                "- Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections."
+
+                                "Return only the JSON. Do not include explanations, notes, or any other commentary."
                             ),
                         },
                         {
@@ -101,27 +141,66 @@ def call_gpt4o_with_image(image_bytes):
     except Exception as e:
         return f"Error communicating with OpenAI: {str(e)}"
 
+
+def send_to_gpt4o_azure(prompt, pdf_text):
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a specialized invoice data extraction assistant. Extract the requested fields from the invoice image and return ONLY a valid JSON object with no additional text or explanations."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (prompt),
+                        },
+                        {
+                            "type": "text",                            
+                            "text": pdf_text,
+                        },
+                    ],
+                }
+            ],
+            max_tokens=1000,
+            temperature=0,  
+            response_format={"type": "json_object"} 
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error communicating with OpenAI: {str(e)}"
+
+
+
 @app.post("/process-pdf")
 async def process_pdf(file: UploadFile = File(...)):
     print("inside function psot")
-    if not file.filename.endswith(".pdf"):
+    if not file.filename.lower().endswith(".pdf"):
        raise HTTPException(status_code=400, detail="File must be a PDF.")
     
     pdf_bytes = await file.read()    
     try:
-        images = pdf_to_images(pdf_bytes)
+        #images = pdf_to_images(pdf_bytes)
         results = []
         
-        new_img = join_images_from_bytes(images)
-        response = call_gpt4o_with_image(new_img)
-        results.append(response)
+        #new_img = join_images_from_bytes(images)
+        #response = call_gpt4o_with_image(new_img)
+        #results.append(response)
      
         #for img in images:
         #    response = call_gpt4o_with_image(img)
         #    results.append(response)
         #results = [call_gpt4o_with_image(img) for img in images]
         #return JSONResponse(content={"results": results})
-        return  results 
+        pdf_path = 'ingrammicrous_5 page inv TEST.pdf'
+        pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
+        response = send_to_gpt4o_azure(INVOICE_EXTRACTION_PROMPT, pdf_text)
+        return  response
+        #return  results 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -153,6 +232,7 @@ async def extract_attachments(eml_file: UploadFile = File(...)):
 
     print("❌ No PDF attachment found in the .eml file.")
     return None
+
 
 if __name__ == '__main__':
     uvicorn.run('main:app', host='0.0.0.0', port=8000)
