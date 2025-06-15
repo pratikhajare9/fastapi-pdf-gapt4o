@@ -9,22 +9,52 @@ import uvicorn
 from email import policy
 from email.parser import BytesParser
 from pdf2image import convert_from_path,convert_from_bytes
-import os
+import json
 
-# Path to the .eml file
-eml_file_path = "Invoice.eml"
+json_obj = {
+    "Invoice Number": "1183022",
+    "Invoice Date": "10-01-2023",
+    "Vendor Name": "Emburse Inc.",
+    "Purchase Order": "60",
+    "Total Amount": 634.10
+}
 
-# Output directory for extracted PDFs
-output_dir = "extracted_pdfs"
+json_arr = {
+  "invoices": [
+    {
+      "Invoice Number": "30-21401-11",
+      "Invoice Date": "05-08-2025",
+      "Vendor Name": "Ingram Micro Inc.",
+      "Purchase Order": "25MIA7536",
+      "Total Amount": 314.26
+    }
+    ]
+}
 
 app = FastAPI()
 
 # Configure your GPT-4o API key here
 client = AzureOpenAI(
-    api_key="7luBW95hdzPGbjLW1ib2bJMpKOA5D4GeVK14Ms1VjAd25Yv14Fe6JQQJ99BDAC4f1cMXJ3w3AAAAACOGqjaP",  # Replace with your actual API key
+    #api_key="7luBW95hdzPGbjLW1ib2bJMpKOA5D4GeVK14Ms1VjAd25Yv14Fe6JQQJ99BDAC4f1cMXJ3w3AAAAACOGqjaP",  # Replace with your actual API key
+    api_key="4vFtdPo0ily6CRvdsT9fI0FK5P6sTWB10yM3RTm9LDRYexIwppsXJQQJ99BFACYeBjFXJ3w3AAABACOGHbg1",
     api_version="2025-01-01-preview", # Replace with your actual API version
-    azure_endpoint="https://at-aiagent-ai-studio-wu.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview", # Replace with your actual Azure endpoint
+    #azure_endpoint="https://at-aiagent-ai-studio-wu.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview", # Replace with your actual Azure endpoint
+    azure_endpoint="https://rz-vinvauto-openai.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview"
 )
+
+# === extract JSON schema ===
+def extract_schema(obj):
+    if isinstance(obj, dict):
+        return {k: extract_schema(v) for k, v in obj.items()}
+    elif isinstance(obj, list) and obj:
+        return [extract_schema(obj[0])]  # assume list items have same schema
+    else:
+        return type(obj).__name__
+    
+# === compare JSON schema ==
+def compare_schemas(json1, json2):
+    return extract_schema(json1) == extract_schema(json2)
+
 # === Read PDF Text ===
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
@@ -47,10 +77,10 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
 INVOICE_EXTRACTION_PROMPT = """
             You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents. The document may contain one or multiple invoices, often across several pages.
 
-            From each invoice, identify and extract the following fields in a consistent JSON array format. Maintain the order of invoices as found in the document.
+            From each invoice, identify and extract the following fields in a consistent JSON array format. Always return an array of invoice objects, even if only one invoice is found. Maintain the order of invoices as found in the document.
             Extract and return data in this exact JSON structure:
 
-            [{Invoice Number: <Invoice number string>,Invoice Date: <Date in MM-DD-YYYY format>,Vendor Name: <Vendor or company name (from header or logo)>,Purchase Order: <Purchase order number or code>,Total Amount: <Total invoice amount as number, no currency symbol>,}]
+            [{Invoice Number: <Invoice number string>,Invoice Date: <Date in YYYY-MM-DD format>,Vendor Name: <Vendor name (from header or logo)>,Purchase Order: <Purchase order number or code>,Total Amount: <Total invoice amount as number, no currency symbol>},...]
 
             ### Guidelines:
             - Always return an array of invoice objects, even if only one invoice is found.
@@ -58,8 +88,9 @@ INVOICE_EXTRACTION_PROMPT = """
             - Purchase Order may appear as PO, Customer PO, or embedded in descriptions—extract the most relevant code associated with order tracking.
             - Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available.
             - Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections.
-
             Return only the JSON. Do not include explanations, notes, or any other commentary.
+
+            If the file is not recognized as valid invoice rather it is of Statement, Purchase order, Certificate, Notice, etc; then return the value 'No Invoice'
             """
 
 def join_images_from_bytes(image_bytes_list):
@@ -92,7 +123,7 @@ def pdf_to_images(pdf_bytes):
         images.append(buffered.getvalue())
     return images
 
-def call_gpt4o_with_image(image_bytes):
+def call_gpt4o_with_image(prompt,image_bytes):
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     try:
         response = client.chat.completions.create(
@@ -107,23 +138,7 @@ def call_gpt4o_with_image(image_bytes):
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                "You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents. The document may contain one or multiple invoices, often across several pages."
-
-                                "From each invoice, identify and extract the following fields in a consistent JSON array format. Maintain the order of invoices as found in the document."
-                                "Extract and return data in this exact JSON structure:"
-
-                                "[{Invoice Number: <Invoice number string>,Invoice Date: <Date in YYYY-MM-DD format>,Vendor Name: <Vendor or company name (from header or logo)>,Purchase Order: <Purchase order number or code>,Total Amount: <Total invoice amount as number, no currency symbol>,}]"
-
-                                "### Guidelines:"
-                                "- Always return an array of invoice objects, even if only one invoice is found."
-                                "- Vendor Name may be found in headers, footers, or logos (e.g., 'Ingram Micro Inc.', 'Park Place Technologies LLC')."
-                                "- Purchase Order may appear as PO, Customer PO, or embedded in descriptions—extract the most relevant code associated with order tracking."
-                                "- Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available."
-                                "- Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections."
-
-                                "Return only the JSON. Do not include explanations, notes, or any other commentary."
-                            ),
+                            "text": (prompt),
                         },
                         {
                             "type": "image_url",
@@ -142,7 +157,7 @@ def call_gpt4o_with_image(image_bytes):
         return f"Error communicating with OpenAI: {str(e)}"
 
 
-def send_to_gpt4o_azure(prompt, pdf_text):
+def call_gpt4o_with_text(prompt, pdf_text):
 
     try:
         response = client.chat.completions.create(
@@ -178,29 +193,40 @@ def send_to_gpt4o_azure(prompt, pdf_text):
 
 @app.post("/process-pdf")
 async def process_pdf(file: UploadFile = File(...)):
-    print("inside function psot")
+    print("inside function process_pdf")
     if not file.filename.lower().endswith(".pdf"):
        raise HTTPException(status_code=400, detail="File must be a PDF.")
     
     pdf_bytes = await file.read()    
     try:
-        #images = pdf_to_images(pdf_bytes)
-        results = []
-        
-        #new_img = join_images_from_bytes(images)
-        #response = call_gpt4o_with_image(new_img)
-        #results.append(response)
-     
-        #for img in images:
-        #    response = call_gpt4o_with_image(img)
-        #    results.append(response)
-        #results = [call_gpt4o_with_image(img) for img in images]
-        #return JSONResponse(content={"results": results})
-        pdf_path = 'ingrammicrous_5 page inv TEST.pdf'
-        pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
-        response = send_to_gpt4o_azure(INVOICE_EXTRACTION_PROMPT, pdf_text)
+        response = ""
+
+        if(file.filename.lower().startswith("ingram")):
+                   
+            pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
+            response = call_gpt4o_with_text(INVOICE_EXTRACTION_PROMPT, pdf_text)
+
+            #for img in images:
+            #    response = call_gpt4o_with_image(img)
+            #    results.append(response)
+            #results = [call_gpt4o_with_image(img) for img in images]
+            #return JSONResponse(content={"results": results})
+        else:
+            images = pdf_to_images(pdf_bytes)         
+            new_img = join_images_from_bytes(images)
+            response = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
+
+        # === All the response should be in same JSON format as per variable json_arr, if not then make it ===
+        json_object = json.loads(response)
+
+        if(compare_schemas(json_obj,json_object)):
+            response = {"invoices": [json_object]}
+        if(compare_schemas(json_arr,json_object)):
+            response = response
+        if (response.find("No Invoice") != -1):
+            response = '{"invoices":[{"Invoice Number":"NoInvoice","Invoice Date":"NoInvoice","Vendor Name":"NoInvoice","Purchase Order":"NoInvoice","Total Amount":0}]}'
         return  response
-        #return  results 
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -224,10 +250,6 @@ async def extract_attachments(eml_file: UploadFile = File(...)):
                 "filename": filename,
                 "content_base64": encoded_pdf
             })
-            #filepath = os.path.join(filename)
-            #with open(filepath, 'wb') as pdf_file:
-            #    pdf_file.write(part.get_payload(decode=True))
-            #print(f"✅ Extracted PDF: {filepath}")
             return JSONResponse(content={"pdf_files": pdf_files})
 
     print("❌ No PDF attachment found in the .eml file.")
