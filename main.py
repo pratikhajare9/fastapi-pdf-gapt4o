@@ -221,9 +221,9 @@ async def process_pdf(file: UploadFile = File(...)):
 
         if(compare_schemas(json_obj,json_object)):
             response = {"invoices": [json_object]}
-        if(compare_schemas(json_arr,json_object)):
+        elif(compare_schemas(json_arr,json_object)):
             response = response
-        if (response.find("No Invoice") != -1):
+        elif (response.find("No Invoice") != -1):
             response = '{"invoices":[{"Invoice Number":"NoInvoice","Invoice Date":"NoInvoice","Vendor Name":"NoInvoice","Purchase Order":"NoInvoice","Total Amount":0}]}'
         return  response
 
