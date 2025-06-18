@@ -10,6 +10,9 @@ from email import policy
 from email.parser import BytesParser
 from pdf2image import convert_from_path,convert_from_bytes
 import json
+import re
+from collections import defaultdict
+from pathlib import Path
 
 json_obj = {
     "Invoice Number": "1183022",
@@ -63,6 +66,10 @@ def extract_text_from_pdf(pdf_path):
         full_text += page.get_text()
     return full_text
 
+def get_page_count_from_pdf_bytes(pdf_bytes):
+    pdf_file = fitz.open(stream=pdf_bytes, filetype="pdf")
+    return len(pdf_file)
+
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     # Open PDF from bytes
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -73,6 +80,38 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
 
     return full_text
 
+def extract_invoice_number(text):
+    """Extract invoice number using regex."""
+    match = re.search(r'Invoice\s+#?:?\s*(\d{6,})', text, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def split_pdf_by_invoice_number(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    invoice_last_pages = {}
+    files_bytes = []
+    current_invoice = None
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text()
+
+        # Check for keywords
+        if "Invoice Total:" in text and "Invoice" in text:
+            invoice_num = extract_invoice_number(text)
+            if invoice_num:
+                invoice_last_pages[invoice_num] = page_num  # New invoice found
+
+    for invoice_num, page_num  in invoice_last_pages.items():
+        new_doc = fitz.open()
+        new_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)        
+        pdf_bytes_io = io.BytesIO()
+        new_doc.save(pdf_bytes_io)
+        new_doc.close()
+        files_bytes.append(pdf_bytes_io.getvalue())
+
+    return files_bytes
+        
+    
 # === Your Prompt ===
 INVOICE_EXTRACTION_PROMPT = """
             You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents. The document may contain one or multiple invoices, often across several pages.
@@ -80,17 +119,19 @@ INVOICE_EXTRACTION_PROMPT = """
             From each invoice, identify and extract the following fields in a consistent JSON array format. Always return an array of invoice objects, even if only one invoice is found. Maintain the order of invoices as found in the document.
             Extract and return data in this exact JSON structure:
 
-            [{Invoice Number: <Invoice number string>,Invoice Date: <Date in YYYY-MM-DD format>,Vendor Name: <Vendor name (from header or logo)>,Purchase Order: <Purchase order number or code>,Total Amount: <Total invoice amount as number, no currency symbol>},...]
+            [{Invoice Number: <Invoice number string>,Invoice Date: <Date in YYYY-MM-DD format>,Vendor Name: <Vendor name (from logo, if no logo then header)>,Purchase Order: <usually marked as Purchase Order or PO Number or PO# or PO>,Total Amount: <Total invoice amount as number, no currency symbol>},...]
 
             ### Guidelines:
             - Always return an array of invoice objects, even if only one invoice is found.
             - Vendor Name may be found in headers, footers, or logos (e.g., 'Ingram Micro Inc.', 'Park Place Technologies LLC').
-            - Purchase Order may appear as PO, Customer PO, or embedded in descriptions—extract the most relevant code associated with order tracking.
+            - Purchase Order may appear as 'PO', 'Customer PO', 'Purchase Order' or 'PO Number' or 'PO#' or 'P.O. NUMBER' with separate heading. Don't read it form table information present in invoice. Send '' if not found any relavent value.
             - Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available.
             - Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections.
+            
             Return only the JSON. Do not include explanations, notes, or any other commentary.
 
             If the file is not recognized as valid invoice rather it is of Statement, Purchase order, Certificate, Notice, etc; then return the value 'No Invoice'
+            Mimecast sometimes sends Invoice with heading Consolidated Invoice, so consider it as Invoice Only.
             """
 
 def join_images_from_bytes(image_bytes_list):
@@ -108,7 +149,7 @@ def join_images_from_bytes(image_bytes_list):
         y_offset += img.height
     buffered = io.BytesIO()
     new_img.save(buffered, format="PNG")
-    new_img.save("combined_pages.png", "PNG")
+    #new_img.save("combined_pages.png", "PNG")
     return buffered.getvalue()
 
 def pdf_to_images(pdf_bytes):
@@ -124,6 +165,7 @@ def pdf_to_images(pdf_bytes):
     return images
 
 def call_gpt4o_with_image(prompt,image_bytes):
+    print("Inside call_gpt4o_with_image: Start")
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     try:
         response = client.chat.completions.create(
@@ -152,6 +194,7 @@ def call_gpt4o_with_image(prompt,image_bytes):
             temperature=0,  
             response_format={"type": "json_object"} 
         )
+        print("Inside call_gpt4o_with_image: End")
         return response.choices[0].message.content
     except Exception as e:
         return f"Error communicating with OpenAI: {str(e)}"
@@ -200,29 +243,33 @@ async def process_pdf(file: UploadFile = File(...)):
     pdf_bytes = await file.read()    
     try:
         response = ""
-
+        invs=[]
         if(file.filename.lower().startswith("ingram")):
-                   
-            pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
-            response = call_gpt4o_with_text(INVOICE_EXTRACTION_PROMPT, pdf_text)
+            pdfs = split_pdf_by_invoice_number(pdf_bytes)
+            for bytes in pdfs:
+                images = pdf_to_images(bytes)         
+                new_img = join_images_from_bytes(images)
+                inv = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
+                invs.append(json.loads(inv))            
+            json_object = {"invoices":invs}
 
-            #for img in images:
-            #    response = call_gpt4o_with_image(img)
-            #    results.append(response)
-            #results = [call_gpt4o_with_image(img) for img in images]
-            #return JSONResponse(content={"results": results})
+        elif(get_page_count_from_pdf_bytes(pdf_bytes) > 6):
+            pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
+            inv = call_gpt4o_with_text(INVOICE_EXTRACTION_PROMPT, pdf_text)
+            invs.append(json.loads(inv))
+            json_object = {"invoices":invs}
+            
         else:
             images = pdf_to_images(pdf_bytes)         
             new_img = join_images_from_bytes(images)
             response = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
-
-        # === All the response should be in same JSON format as per variable json_arr, if not then make it ===
-        json_object = json.loads(response)
+            # === All the response should be in same JSON format as per variable json_arr, if not then make it ===
+            json_object = json.loads(response)
 
         if(compare_schemas(json_obj,json_object)):
             response = {"invoices": [json_object]}
         elif(compare_schemas(json_arr,json_object)):
-            response = response
+            response = json_object
         elif (response.find("No Invoice") != -1):
             response = '{"invoices":[{"Invoice Number":"NoInvoice","Invoice Date":"NoInvoice","Vendor Name":"NoInvoice","Purchase Order":"NoInvoice","Total Amount":0}]}'
         return  response
