@@ -14,12 +14,20 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-json_obj = {
+json_obj1 = {
     "Invoice Number": "1183022",
     "Invoice Date": "10-01-2023",
     "Vendor Name": "Emburse Inc.",
-    "Purchase Order": "60",
+    "Purchase Order": "A60",
     "Total Amount": 634.10
+}
+
+json_obj2= {
+        'Invoice Number' :'RAZ202402002',
+        'Invoice Date' :'2024-02-29',
+        'Vendor Name' :'Atidan Technologies Pvt Ltd',
+        'Purchase Order':'',
+        'Total Amount' :68576
 }
 
 json_arr = {
@@ -114,7 +122,7 @@ def split_pdf_by_invoice_number(pdf_bytes):
     
 # === Your Prompt ===
 INVOICE_EXTRACTION_PROMPT = """
-            You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents. The document may contain one or multiple invoices, often across several pages.
+            You are an intelligent document parser tasked with extracting structured data from scanned or digital invoice documents or pdf text. The document may contain one or multiple invoices, often across several pages.
 
             From each invoice, identify and extract the following fields in a consistent JSON array format. Always return an array of invoice objects, even if only one invoice is found. Maintain the order of invoices as found in the document.
             Extract and return data in this exact JSON structure:
@@ -124,14 +132,15 @@ INVOICE_EXTRACTION_PROMPT = """
             ### Guidelines:
             - Always return an array of invoice objects, even if only one invoice is found.
             - Vendor Name may be found in headers, footers, or logos (e.g., 'Ingram Micro Inc.', 'Park Place Technologies LLC').
-            - Purchase Order may appear as 'PO', 'Customer PO', 'Purchase Order' or 'PO Number' or 'PO#' or 'P.O. NUMBER' with separate heading. Don't read it form table information present in invoice. Send '' if not found any relavent value.
+            - Purchase Order may appear as 'PO', 'Customer PO', 'Purchase Order' or 'PO Number' or 'PO#' or 'P.O. NUMBER' with separate heading. Send '' if not found any relavent value.
             - Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available.
             - Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections.
-            
+            - Invoice Date sometime marked as "Created Date"
             Return only the JSON. Do not include explanations, notes, or any other commentary.
 
             If the file is not recognized as valid invoice rather it is of Statement, Purchase order, Certificate, Notice, etc; then return the value 'No Invoice'
-            Mimecast sometimes sends Invoice with heading Consolidated Invoice, so consider it as Invoice Only.
+            Some vendors like Mimecast(Mimecast North America, Inc.) or Kaseya sometimes sends Invoice with heading Consolidated Invoice, so consider it as Invoice Only.
+            For vendor 'Park Place Technologies LLC' the invoice has the heading as Credit Memo. Also, 'Invoice Number' marked as 'Credit', 'Invoice Date' is marked as 'Date','Vendor Name' is marked with value 'Park Place Technologies LLC', 'Purchase Order' as 'Purchase Order','Total Amount' is marked as 'Total'.
             """
 
 def join_images_from_bytes(image_bytes_list):
@@ -208,23 +217,26 @@ def call_gpt4o_with_text(prompt, pdf_text):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a specialized invoice data extraction assistant. Extract the requested fields from the invoice image and return ONLY a valid JSON object with no additional text or explanations."
+                    "content": "You are a specialized invoice data extraction assistant. Extract the requested fields from the invoice text and return ONLY a valid JSON object with no additional text or explanations."
                 },
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (prompt),
-                        },
-                        {
-                            "type": "text",                            
-                            "text": pdf_text,
-                        },
-                    ],
+                    "content": prompt + "\n\n" + pdf_text
+                    # [
+                    #     {
+                    #         "type": "text",
+                    #         "text": (prompt),
+                    #     },
+                    #     {
+                    #         "type": "text",                            
+                    #         "text": pdf_text,
+                    #     },
+                    # ]
+                    
+                    ,
                 }
             ],
-            max_tokens=1000,
+            max_tokens=10000,
             temperature=0,  
             response_format={"type": "json_object"} 
         )
@@ -253,7 +265,7 @@ async def process_pdf(file: UploadFile = File(...)):
                 invs.append(json.loads(inv))            
             json_object = {"invoices":invs}
 
-        elif(get_page_count_from_pdf_bytes(pdf_bytes) > 6):
+        elif(get_page_count_from_pdf_bytes(pdf_bytes) > 4):
             pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
             inv = call_gpt4o_with_text(INVOICE_EXTRACTION_PROMPT, pdf_text)
             invs.append(json.loads(inv))
@@ -266,11 +278,13 @@ async def process_pdf(file: UploadFile = File(...)):
             # === All the response should be in same JSON format as per variable json_arr, if not then make it ===
             json_object = json.loads(response)
 
-        if(compare_schemas(json_obj,json_object)):
+        if(compare_schemas(json_obj1,json_object)):
+            response = {"invoices": [json_object]}
+        elif(compare_schemas(json_obj2,json_object)):
             response = {"invoices": [json_object]}
         elif(compare_schemas(json_arr,json_object)):
             response = json_object
-        elif (response.find("No Invoice") != -1):
+        elif (json.dumps(json_object).find("No Invoice") != -1):
             response = '{"invoices":[{"Invoice Number":"NoInvoice","Invoice Date":"NoInvoice","Vendor Name":"NoInvoice","Purchase Order":"NoInvoice","Total Amount":0}]}'
         return  response
 
