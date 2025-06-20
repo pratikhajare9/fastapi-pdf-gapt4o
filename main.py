@@ -90,7 +90,7 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
 
 def extract_invoice_number(text):
     """Extract invoice number using regex."""
-    match = re.search(r'Invoice\s+#?:?\s*(\d{6,})', text, re.IGNORECASE)
+    match = re.search(r'(?:INVOICE\s*#|Invoice\s*#:)\s*([\w\-]+)', text, re.IGNORECASE)
     return match.group(1) if match else None
 
 
@@ -104,7 +104,7 @@ def split_pdf_by_invoice_number(pdf_bytes):
         text = page.get_text()
 
         # Check for keywords
-        if "Invoice Total:" in text and "Invoice" in text:
+        if "invoice total" in text.lower() and "invoice" in text.lower():
             invoice_num = extract_invoice_number(text)
             if invoice_num:
                 invoice_last_pages[invoice_num] = page_num  # New invoice found
@@ -141,6 +141,7 @@ INVOICE_EXTRACTION_PROMPT = """
             If the file is not recognized as valid invoice rather it is of Statement, Purchase order, Certificate, Notice, etc; then return the value 'No Invoice'
             Some vendors like Mimecast(Mimecast North America, Inc.) or Kaseya sometimes sends Invoice with heading Consolidated Invoice, so consider it as Invoice Only.
             For vendor 'Park Place Technologies LLC' the invoice has the heading as Credit Memo. Also, 'Invoice Number' marked as 'Credit', 'Invoice Date' is marked as 'Date','Vendor Name' is marked with value 'Park Place Technologies LLC', 'Purchase Order' as 'Purchase Order','Total Amount' is marked as 'Total'.
+            For 'Lora M Cox' invoice file consider Venfor Name as 'Lora M Cox' not 'Razor Technology'. 
             """
 
 def join_images_from_bytes(image_bytes_list):
