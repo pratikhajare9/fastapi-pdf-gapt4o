@@ -42,6 +42,17 @@ json_arr = {
     ]
 }
 
+json_arr1 = {
+  "Invoices": [
+    {
+      "Invoice Number": "30-21401-11",
+      "Invoice Date": "05-08-2025",
+      "Vendor Name": "Ingram Micro Inc.",
+      "Purchase Order": "25MIA7536",
+      "Total Amount": 314.26
+    }
+    ]
+}
 app = FastAPI()
 
 # Configure your GPT-4o API key here
@@ -142,6 +153,9 @@ INVOICE_EXTRACTION_PROMPT = """
             Some vendors like Mimecast(Mimecast North America, Inc.) or Kaseya sometimes sends Invoice with heading Consolidated Invoice, so consider it as Invoice Only.
             For vendor 'Park Place Technologies LLC' the invoice has the heading as Credit Memo. Also, 'Invoice Number' marked as 'Credit', 'Invoice Date' is marked as 'Date','Vendor Name' is marked with value 'Park Place Technologies LLC', 'Purchase Order' as 'Purchase Order','Total Amount' is marked as 'Total'.
             For 'Lora M Cox' invoice file consider Venfor Name as 'Lora M Cox' not 'Razor Technology'. 
+            For vendor 'Quantum', consider 'Statement of Account' as invoice.
+            For vendor 'VOITH', consider 'Payment advice notification' as invoice.
+            For vendor 'GRSM50 GORDON REES SCULLY MANSUKHANI', consider BILLING SUMMARY as invoice.
             """
 
 def join_images_from_bytes(image_bytes_list):
@@ -269,8 +283,6 @@ async def process_pdf(file: UploadFile = File(...)):
         elif(get_page_count_from_pdf_bytes(pdf_bytes) > 4):
             pdf_text = extract_text_from_pdf_bytes(pdf_bytes) #extract_text_from_pdf(pdf_path)
             inv = call_gpt4o_with_text(INVOICE_EXTRACTION_PROMPT, pdf_text)
-            invs.append(json.loads(inv))
-            json_object = {"invoices":invs}
             
         else:
             images = pdf_to_images(pdf_bytes)         
@@ -278,7 +290,16 @@ async def process_pdf(file: UploadFile = File(...)):
             response = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
             # === All the response should be in same JSON format as per variable json_arr, if not then make it ===
             json_object = json.loads(response)
-
+            
+        #To convert the key "Invoices" to lowercase ("invoices") in the given JSON
+        if(compare_schemas(json_arr,json.loads(inv)) or compare_schemas(json_arr1,json.loads(inv))):
+            json_object=json.loads(inv)
+            json_object={k.lower(): v for k, v in json_object.items()}
+        else:
+            invs.append(json.loads(inv))
+            json_object = {"invoices":invs}
+        ####
+        
         if(compare_schemas(json_obj1,json_object)):
             response = {"invoices": [json_object]}
         elif(compare_schemas(json_obj2,json_object)):
