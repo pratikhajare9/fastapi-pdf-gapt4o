@@ -157,6 +157,7 @@ INVOICE_EXTRACTION_PROMPT = """
             For vendor 'VOITH', consider 'Payment advice notification' as invoice.
             For vendor 'GRSM50 GORDON REES SCULLY MANSUKHANI', consider BILLING SUMMARY as invoice.
             For file contains the text 'NSM Insurance Group' then consider Vendor Name as 'NSM Insurance Group'
+            For files contains 'REMIT TO: BDO' then consider Vendor Name as 'BDO Digital'
             """
 
 def join_images_from_bytes(image_bytes_list):
