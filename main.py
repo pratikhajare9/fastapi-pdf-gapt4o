@@ -143,7 +143,7 @@ INVOICE_EXTRACTION_PROMPT = """
             ### Guidelines:
             - Always return an array of invoice objects, even if only one invoice is found.
             - Vendor Name may be found in headers, footers, or logos (e.g., 'Ingram Micro Inc.', 'Park Place Technologies LLC').
-            - Purchase Order may appear as 'PO', 'Customer PO', 'Purchase Order' or 'PO Number' or 'PO#' or 'P.O. NUMBER' with separate heading. Send '' if not found any relavent value.
+            - Purchase Order may appear as 'PO', 'CUSTOMER PO', 'Purchase Order' or 'PO Number' or 'PO#' or 'P.O. NUMBER' with separate heading. Send '' if not found any relavent value.
             - Total Amount must include all charges (subtotal + tax + freight) if listed, or the final total if directly available.
             - Parse all pages and ensure no invoice is missed, especially in documents with multiple pages or summary sections.
             - Invoice Date sometime marked as "Created Date"
@@ -156,6 +156,7 @@ INVOICE_EXTRACTION_PROMPT = """
             For vendor 'Quantum', consider 'Statement of Account' as invoice.
             For vendor 'VOITH', consider 'Payment advice notification' as invoice.
             For vendor 'GRSM50 GORDON REES SCULLY MANSUKHANI', consider BILLING SUMMARY as invoice.
+            For file contains the text 'NSM Insurance Group' then consider Vendor Name as 'NSM Insurance Group'
             """
 
 def join_images_from_bytes(image_bytes_list):
@@ -274,9 +275,13 @@ async def process_pdf(file: UploadFile = File(...)):
         if(file.filename.lower().startswith("ingram")):
             pdfs = split_pdf_by_invoice_number(pdf_bytes)
             for bytes in pdfs:
-                images = pdf_to_images(bytes)         
-                new_img = join_images_from_bytes(images)
-                inv = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
+                # images = pdf_to_images(bytes)         
+                # new_img = join_images_from_bytes(images)
+                # inv = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
+
+                pdf_text = extract_text_from_pdf_bytes(bytes) #extract_text_from_pdf(pdf_path)
+                inv = call_gpt4o_with_text(INVOICE_EXTRACTION_PROMPT, pdf_text)
+
                 invs.append(json.loads(inv))            
             json_object = {"invoices":invs}
 
@@ -287,19 +292,15 @@ async def process_pdf(file: UploadFile = File(...)):
         else:
             images = pdf_to_images(pdf_bytes)         
             new_img = join_images_from_bytes(images)
-            response = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
+            inv = call_gpt4o_with_image(INVOICE_EXTRACTION_PROMPT, new_img)
             # === All the response should be in same JSON format as per variable json_arr, if not then make it ===
-            json_object = json.loads(response)
+            json_object = json.loads(inv)
             
         #To convert the key "Invoices" to lowercase ("invoices") in the given JSON
         if(compare_schemas(json_arr,json.loads(inv)) or compare_schemas(json_arr1,json.loads(inv))):
             json_object=json.loads(inv)
             json_object={k.lower(): v for k, v in json_object.items()}
-        else:
-            invs.append(json.loads(inv))
-            json_object = {"invoices":invs}
-        ####
-        
+
         if(compare_schemas(json_obj1,json_object)):
             response = {"invoices": [json_object]}
         elif(compare_schemas(json_obj2,json_object)):
